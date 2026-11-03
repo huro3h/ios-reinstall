@@ -43,5 +43,5 @@ description: ios-reinstall(USB でつないだ iPhone に、Personal Team の署
 
 ## 対象のアプリ側
 
-aozora・pixwash はヘッダーの真ん中に署名の期限(「期限 11/10・あと6日」)を出している(`Support/ProvisioningExpiry.swift`、両方に同じファイル)。
+aozora・pixwash はヘッダーの真ん中に署名の期限(「11/10 22:05」と「6日23時間」の2行)を出している(`Support/ProvisioningExpiry.swift`、両方に同じファイル)。
 アプリ内の `embedded.mobileprovision` を読んでいる。
