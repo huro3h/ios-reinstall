@@ -1,0 +1,7 @@
+{
+  "threshold_days": 6,
+  "apps": [
+    { "name": "aozora", "project_dir": "~/projects/aozora", "scheme": "Aozora" },
+    { "name": "pixwash", "project_dir": "~/projects/pixwash", "scheme": "Pixwash" }
+  ]
+}

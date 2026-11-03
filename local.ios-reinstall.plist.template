@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{{LABEL}}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{RUBY}}</string>
+		<string>{{SCRIPT}}</string>
+	</array>
+	<!-- iPhone をつないだことを知る手段がないので、5分ごとに見に行く(つながっていなければすぐ終わる) -->
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- xcodegen(Homebrew)と git を見つけられるようにする -->
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>DEVELOPER_DIR</key>
+		<string>/Applications/Xcode.app/Contents/Developer</string>
+		<!-- LANG が無いと osascript に渡す日本語が化ける -->
+		<key>LANG</key>
+		<string>ja_JP.UTF-8</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>{{LOG}}</string>
+	<key>StandardErrorPath</key>
+	<string>{{LOG}}</string>
+</dict>
+</plist>

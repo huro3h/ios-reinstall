@@ -1,0 +1,4 @@
+# 手元の環境に固有の設定。ios-reinstall.example.json を雛形として使う
+ios-reinstall.json
+
+.DS_Store
