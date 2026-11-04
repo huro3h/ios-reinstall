@@ -2,3 +2,6 @@
 ios-reinstall.json
 
 .DS_Store
+
+# setup.rb がビルドする usb-trigger
+.build/

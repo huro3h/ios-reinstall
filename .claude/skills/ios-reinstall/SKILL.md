@@ -7,9 +7,11 @@ description: ios-reinstall(USB でつないだ iPhone に、Personal Team の署
 
 ## 何をしているか
 
-`ios-reinstall.rb` を LaunchAgent(`local.ios-reinstall`、`StartInterval` 300 秒)が起動する。
+iPhone を USB でつなぐと、LaunchAgent(`local.ios-reinstall`)が `LaunchEvents` の `com.apple.iokit.matching` で
+`usb-trigger`(`usb-trigger.swift` を `setup.rb` が `.build/` にビルドしたもの)を起動し、それが `ios-reinstall.rb --on-connect` を実行する。
+条件は `IOUSBHostDevice`・`idVendor` 1452・`idProduct` 4776(0x12a8、iPhone)。
 
-1. `devicectl list devices` で、`transportType == "wired"` かつ `pairingState == "paired"` の iPhone を探す。なければ終わる。
+1. `devicectl list devices` で、`transportType == "wired"` かつ `pairingState == "paired"` の iPhone を探す。`--on-connect` なら見えるまで最大30秒待つ。なければ終わる。
    Wi-Fi 経由(transportType が wired 以外)は遅く途中で切れやすいので使わない。
 2. 設定のアプリごとに、Mac の `~/Library/Developer/Xcode/UserData/Provisioning Profiles` からそのアプリのプロファイルを探し、
    いちばん新しい期限を「いま iPhone に入っているアプリの期限」とみなす(**iPhone 側の期限は devicectl では取れない**)。
@@ -18,6 +20,8 @@ description: ios-reinstall(USB でつないだ iPhone に、Personal Team の署
 4. 入れ直し: キャッシュ(`~/Library/Caches/ios-reinstall/<name>`)に clone した作業ツリーで最新のタグを checkout し、
    `Config/Local.xcconfig` を写して `xcodegen generate` → **手元のプロファイルを消して** `xcodebuild -allowProvisioningUpdates`
    → `devicectl device install app`。起動はしない(使っている最中のアプリを勝手に前に出さない)。
+5. 入れ直しを始めるときにターミナルのウインドウを開き、`ios-reinstall.rb --follow ~/Library/Caches/ios-reinstall/progress.log` で
+   進み具合を出す。終わったら終わりの印の行を書き、読む側が終わってからウインドウを閉じる。ターミナルが起動していなかったなら終了させる。
 
 ## なぜこうしたか
 
@@ -27,10 +31,18 @@ description: ios-reinstall(USB でつないだ iPhone に、Personal Team の署
   消してからビルドすると、Xcode がその時点から7日のプロファイルを新しく作る(2026-11-03 に pixwash で確認)。
 - **タグから作る**: 手元の作業ツリーは作業中のことがあるので、リリースした版を入れる。手元のリポジトリに worktree を足さず clone にしたのは、
   元のリポジトリの .git を触らないため。`build/` は `git clean -e build` で残して、次のビルドを速くする。
-- 失敗したら1時間は試し直さない・ロック中の通知も1時間に1回(`state.json`)。5分ごとに通知が出続けないようにするため。
+- **つないだときだけ起動する**: 5分ごとに見に行くのはユーザーが不要とした(2026-11-04)。そのため、ロック中なら通知してから
+  外れるまで最大10分待つ(次の起動がないので)。失敗しても次につないだときに試し直すだけで、間を空ける仕組み(旧 `state.json`)はやめた。
 - 二重起動は `flock` で防ぐ(LaunchAgent と手での実行が重なることがある)。
 
 ## ハマりどころ
+
+- `com.apple.iokit.matching` で起動されたジョブは、`xpc_set_event_stream_handler` で合図を受け取らないと launchd に起動し直され続ける。
+  ruby からは受け取れないので `usb-trigger` を挟んでいる。Apple Watch の充電ケーブルも Apple 製(idVendor 1452)なので、製品 ID でも絞る。
+  `IOPropertyMatch` で `USB Product Name` = `iPhone` と絞る形では、iPhone をつないでも起動しなかった(2026-11-04)。
+- ターミナルは起動していないときに `do script` だけを送ると、ウインドウが2枚開く。起動していなければ `activate` してから `in window 1` に送る。
+  また、中で動いているコマンドがあるうちにウインドウを閉じると確認が出るので、`--follow` が終わってから閉じる。
+  `tell application "Terminal"` は送るだけでターミナルを起動するので、起動しているかは `application "Terminal" is running` で確かめる。
 
 - `.mobileprovision` は CMS で署名されているが、中の plist は平文。`<?xml`〜`</plist>` を切り出して読む。
   **`plutil -convert json` は使えない**(日付・バイナリ(証明書)を含むので変換に失敗する)。`plutil -extract <key> raw` で必要な値だけ取る。

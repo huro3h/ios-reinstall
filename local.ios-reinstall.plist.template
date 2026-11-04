@@ -6,14 +6,30 @@
 	<string>{{LABEL}}</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>{{TRIGGER}}</string>
 		<string>{{RUBY}}</string>
 		<string>{{SCRIPT}}</string>
+		<string>--on-connect</string>
 	</array>
-	<!-- iPhone をつないだことを知る手段がないので、5分ごとに見に行く(つながっていなければすぐ終わる) -->
-	<key>StartInterval</key>
-	<integer>300</integer>
-	<key>RunAtLoad</key>
-	<true/>
+	<!-- iPhone が USB でつながったときに起動する。Apple Watch の充電ケーブルなども Apple 製(idVendor 1452)なので、
+	     iPhone の製品 ID(4776 = 0x12a8)で絞る。USB Product Name を IOPropertyMatch で絞る形では起動しなかった -->
+	<key>LaunchEvents</key>
+	<dict>
+		<key>com.apple.iokit.matching</key>
+		<dict>
+			<key>{{LABEL}}.iphone</key>
+			<dict>
+				<key>IOProviderClass</key>
+				<string>IOUSBHostDevice</string>
+				<key>idVendor</key>
+				<integer>1452</integer>
+				<key>idProduct</key>
+				<integer>4776</integer>
+				<key>IOMatchLaunchStream</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<!-- xcodegen(Homebrew)と git を見つけられるようにする -->

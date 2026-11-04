@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# ios-reinstall のセットアップ。LaunchAgent の plist をテンプレートから生成して読み込ませる。
+# ios-reinstall のセットアップ。usb-trigger をビルドし、LaunchAgent の plist をテンプレートから生成して読み込ませる。
 # plist には ruby とスクリプトの絶対パスが要るので、静的ファイルでは持ち運べない。
 #
 #   exit 0 = OK / 2 = エラー
@@ -16,6 +16,9 @@ TOOL_ROOT = File.expand_path(__dir__)
 TEMPLATE  = File.join(TOOL_ROOT, "#{LABEL}.plist.template")
 SCRIPT    = File.join(TOOL_ROOT, 'ios-reinstall.rb')
 CONFIG    = File.join(TOOL_ROOT, 'ios-reinstall.json')
+# iPhone をつないだ合図を受け取ってから ios-reinstall.rb を起動する入口(usb-trigger.swift)
+TRIGGER_SRC = File.join(TOOL_ROOT, 'usb-trigger.swift')
+TRIGGER     = File.join(TOOL_ROOT, '.build', 'usb-trigger')
 DEST      = File.join(Dir.home, 'Library', 'LaunchAgents', "#{LABEL}.plist")
 LOG       = File.join(Dir.home, 'Library', 'Logs', 'ios-reinstall.log')
 
@@ -51,18 +54,24 @@ die("設定ファイルがありません: #{CONFIG}(ios-reinstall.example.json 
 # rbenv の shim は launchd から解決できないので、実体の ruby を埋める
 plist = File.read(TEMPLATE)
             .gsub('{{LABEL}}', LABEL)
+            .gsub('{{TRIGGER}}', TRIGGER)
             .gsub('{{RUBY}}', RbConfig.ruby)
             .gsub('{{SCRIPT}}', SCRIPT)
             .gsub('{{LOG}}', LOG)
 
 unless opts[:apply]
   puts "生成先: #{DEST}"
+  puts "  trigger: #{TRIGGER}(#{File.basename(TRIGGER_SRC)} からビルドする)"
   puts "  ruby   : #{RbConfig.ruby}"
   puts "  script : #{SCRIPT}"
   puts "  log    : #{LOG}"
   puts "\n実際に書き込んで読み込むには --apply を付けてください"
   exit 0
 end
+
+FileUtils.mkdir_p(File.dirname(TRIGGER))
+_, err, st = Open3.capture3('xcrun', 'swiftc', '-O', '-o', TRIGGER, TRIGGER_SRC)
+die("usb-trigger のビルドに失敗: #{err}") unless st.success?
 
 FileUtils.mkdir_p(File.dirname(DEST))
 File.write(DEST, plist)

@@ -5,9 +5,10 @@
 #   無料の Apple ID(Personal Team)で入れた自作 iOS アプリは、署名のプロファイルが7日で切れると起動できなくなる。
 #   iPhone が USB でつながっていて、期限が近いアプリがあれば、プロファイルを作り直して入れ直す。
 #   既定では残りが6日を切っていれば入れ直すので、毎日つなぐ習慣にすれば期限を気にしなくてよくなる。
-#   LaunchAgent から5分ごとに起動される(setup.rb)。手で実行してもよい。
+#   iPhone を USB でつなぐと、LaunchAgent から usb-trigger 経由で --on-connect 付きで起動される(setup.rb)。手で実行してもよい。
 #
 #   入れるのは手元の作業中のコードではなく、最新のリリース(タグ)。キャッシュに clone した別の作業ツリーで作る。
+#   入れ直しを始めるとターミナルのウインドウを開いて進み具合を出し、終わったら閉じる。
 #
 #   exit 0 = 何もしなかった・すべて成功 / 1 = 失敗したアプリがある / 2 = エラー
 
@@ -17,27 +18,38 @@ require 'open3'
 require 'tempfile'
 require 'fileutils'
 require 'time'
+require 'rbconfig'
 
 # launchd 配下では LANG が渡らず default_external が US-ASCII になり、日本語の出力で例外になるため固定する
 Encoding.default_external = Encoding::UTF_8
 $stdout.sync = true
 
 # リリース時はこことタグ(注釈付き・v なしの数字のみ)と CHANGELOG.md を揃える
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 
 TOOL_ROOT    = File.expand_path(__dir__)
 CONFIG       = File.join(TOOL_ROOT, 'ios-reinstall.json')
 CACHE        = File.join(Dir.home, 'Library', 'Caches', 'ios-reinstall')
-STATE        = File.join(CACHE, 'state.json')
+PROGRESS     = File.join(CACHE, 'progress.log')
 PROFILES_DIR = File.join(Dir.home, 'Library', 'Developer', 'Xcode', 'UserData', 'Provisioning Profiles')
 # xcode-select が CommandLineTools を向いていても Xcode の xcodebuild / devicectl を使う
 ENV['DEVELOPER_DIR'] ||= '/Applications/Xcode.app/Contents/Developer'
 
-# 失敗したアプリ・ロック中の知らせは、5分ごとに繰り返さないよう間を空ける
-RETRY_AFTER  = 60 * 60
 DAY          = 24 * 60 * 60
+# --on-connect のとき、つないだ iPhone が devicectl から見えるまで・ロックが外れるまで待つ長さ
+DEVICE_WAIT  = 30
+UNLOCK_WAIT  = 10 * 60
+# 進み具合のファイルの終わりの印。ターミナルで読んでいる側(--follow)はこの行で終わる
+PROGRESS_END = '__ios-reinstall-end__'
 
-def log(message) = puts("#{Time.now.strftime('%F %T')} #{message}")
+$progress = nil # 入れ直している間だけ開いている、進み具合のファイル
+
+def emit(line)
+  puts line
+  $progress&.puts(line)
+end
+
+def log(message) = emit("#{Time.now.strftime('%F %T')} #{message}")
 def die(message) = (warn "error: #{message}"; exit 2)
 
 def notify(message)
@@ -45,9 +57,21 @@ def notify(message)
   Open3.capture2e('osascript', '-e', script)
 end
 
-# コマンドを実行し、失敗したら出力の末尾を付けて例外にする
-def run!(*command, chdir: Dir.pwd)
-  output, status = Open3.capture2e(*command, chdir: chdir)
+def applescript(script)
+  output, = Open3.capture2e('osascript', '-e', script)
+  output.strip
+end
+
+# コマンドを実行し、失敗したら出力の末尾を付けて例外にする。stream: true なら出力をそのままログと進み具合にも流す
+def run!(*command, chdir: Dir.pwd, stream: false)
+  output = +''
+  status = Open3.popen2e(*command, chdir: chdir) do |_stdin, out, thread|
+    out.each_line do |line|
+      output << line
+      emit("  #{line.chomp}") if stream
+    end
+    thread.value
+  end
   return output if status.success?
 
   raise "#{command.first(3).join(' ')} に失敗しました:\n#{output.lines.last(30).join}"
@@ -101,15 +125,6 @@ def bundle_id_of(app)
   File.exist?(local) && File.read(local)[/^\s*PRODUCT_BUNDLE_IDENTIFIER\s*=\s*(\S+)/, 1]
 end
 
-def load_state = File.exist?(STATE) ? JSON.parse(File.read(STATE)) : {}
-
-def save_state(state)
-  FileUtils.mkdir_p(CACHE)
-  File.write(STATE, JSON.pretty_generate(state))
-end
-
-def recently?(time) = time && Time.now - Time.parse(time) < RETRY_AFTER
-
 def remaining_text(expires_at)
   return '期限切れ' unless expires_at && expires_at > Time.now
 
@@ -125,8 +140,87 @@ def wired_devices
   end
 end
 
+# つないだ直後は devicectl からまだ見えないことがあるので、見えるまで少し待つ
+def wait_for_devices
+  deadline = Time.now + DEVICE_WAIT
+  loop do
+    devices = wired_devices
+    return devices if devices.any? || Time.now > deadline
+
+    sleep 3
+  end
+end
+
 def unlocked?(device)
   !devicectl('device', 'info', 'lockState', '--device', device['identifier'])['passcodeRequired']
+end
+
+# 途中で外されると devicectl が失敗するので、そのときもあきらめる
+def wait_for_unlock(device)
+  deadline = Time.now + UNLOCK_WAIT
+  sleep 5 until unlocked?(device) || Time.now > deadline
+  unlocked?(device)
+rescue StandardError
+  false
+end
+
+# ターミナルで新しいウインドウを開き、進み具合のファイルを --follow で読ませる。
+# 起動していなかったら起動して、最初に開くウインドウを使う(do script だけだと2枚開く)
+def open_progress_window
+  FileUtils.mkdir_p(CACHE)
+  $progress = File.open(PROGRESS, 'w')
+  $progress.sync = true
+  command = [RbConfig.ruby, File.join(TOOL_ROOT, 'ios-reinstall.rb'), '--follow', PROGRESS]
+            .map { |arg| "'#{arg}'" }.join(' ') + '; exit'
+  was_running = applescript('application "Terminal" is running') == 'true'
+  id = applescript(<<~SCRIPT)
+    tell application "Terminal"
+      if #{was_running} then
+        do script #{command.to_json}
+      else
+        activate
+        do script #{command.to_json} in window 1
+      end if
+      activate
+      id of front window
+    end tell
+  SCRIPT
+  { id: id.to_i, was_running: was_running }
+end
+
+# 読んでいる側が終わってから閉じる(動いているうちに閉じると、ターミナルが確認を出す)。
+# ターミナルが起動していなかったなら、ターミナルごと終わらせる
+def close_progress_window(window, success)
+  emit(success ? 'すべて終わりました。このウインドウは閉じます' : '失敗しました。ログ: ~/Library/Logs/ios-reinstall.log')
+  $progress.puts(PROGRESS_END)
+  $progress.close
+  $progress = nil
+  sleep 3
+  applescript(<<~SCRIPT)
+    tell application "Terminal"
+      close (every window whose id is #{window[:id]})
+      if not #{window[:was_running]} and (count of windows) is 0 then quit
+    end tell
+  SCRIPT
+end
+
+# ターミナルのウインドウで、進み具合のファイルを終わりの印まで出し続ける
+def follow(path)
+  buffer = +''
+  File.open(path) do |file|
+    loop do
+      chunk = file.read_nonblock(4096, exception: false)
+      next sleep(0.2) if chunk.nil? || chunk == :wait_readable
+
+      buffer << chunk.force_encoding(Encoding::UTF_8)
+      while (newline = buffer.index("\n"))
+        line = buffer.slice!(0..newline).chomp
+        return if line == PROGRESS_END
+
+        puts line
+      end
+    end
+  end
 end
 
 def installed?(device, bundle_id)
@@ -136,6 +230,7 @@ end
 # 最新のタグをキャッシュの作業ツリーに取り出し、署名の設定を写して .xcodeproj を作る
 def prepare_source(app, name)
   source = File.join(CACHE, name)
+  log "#{name}: 最新のタグを取り出しています"
   run!('git', 'clone', '--quiet', app['project_dir'], source) unless Dir.exist?(File.join(source, '.git'))
   run!('git', '-C', source, 'fetch', '--quiet', '--tags', '--force', 'origin')
   tag = run!('git', '-C', app['project_dir'], 'tag', '--sort=-v:refname').lines.first&.strip
@@ -146,6 +241,7 @@ def prepare_source(app, name)
   run!('git', '-C', source, 'clean', '-fdxq', '-e', 'build')
   FileUtils.cp(File.join(app['project_dir'], 'Config', 'Local.xcconfig'), File.join(source, 'Config'))
   run!('xcodegen', 'generate', '--quiet', chdir: source)
+  log "#{name}: #{tag} を取り出しました"
   [source, tag]
 end
 
@@ -154,12 +250,14 @@ def reinstall(app, name, bundle_id, device)
   scheme = app['scheme']
   # 手元のプロファイルが残っていると、それがそのまま使われて期限が延びない。消せば Xcode が新しく作る
   profiles_for(bundle_id).each { |profile| File.delete(profile[:path]) }
+  log "#{name}: ビルドしています(プロファイルも作り直します)"
   run!('xcodebuild', '-quiet', '-project', "#{scheme}.xcodeproj", '-scheme', scheme,
        '-destination', "id=#{device.dig('hardwareProperties', 'udid')}",
        '-derivedDataPath', 'build/DerivedData',
-       '-allowProvisioningUpdates', '-allowProvisioningDeviceRegistration', 'build', chdir: source)
+       '-allowProvisioningUpdates', '-allowProvisioningDeviceRegistration', 'build', chdir: source, stream: true)
   built = File.join(source, 'build', 'DerivedData', 'Build', 'Products', 'Debug-iphoneos', "#{scheme}.app")
-  run!('xcrun', 'devicectl', 'device', 'install', 'app', '--device', device['identifier'], built)
+  log "#{name}: iPhone に入れています"
+  run!('xcrun', 'devicectl', 'device', 'install', 'app', '--device', device['identifier'], built, stream: true)
   [tag, read_profile(File.join(built, 'embedded.mobileprovision'))&.dig(:expires_at)]
 end
 
@@ -169,6 +267,8 @@ OptionParser.new do |o|
              "  USB でつながった iPhone に、署名の期限が近い自作アプリを入れ直す。\n\n"
   o.on('--dry-run', '期限を見るだけで、入れ直さない') { opts[:dry_run] = true }
   o.on('--force NAME', '期限に関係なく、このアプリを入れ直す') { |name| opts[:force] = name }
+  o.on('--on-connect', 'iPhone をつないだときの起動(見えるまで・ロックが外れるまで待つ)') { opts[:on_connect] = true }
+  o.on('--follow PATH', '進み具合のファイルを出し続ける(ターミナルのウインドウで使う)') { |path| follow(path); exit 0 }
   o.on('--config PATH', "設定ファイル(既定: #{CONFIG})") { |path| opts[:config] = path }
   o.on('-v', '--version') { puts VERSION; exit 0 }
   o.on('-h', '--help') { puts o; exit 0 }
@@ -184,14 +284,14 @@ FileUtils.mkdir_p(CACHE)
 lock = File.open(File.join(CACHE, 'lock'), File::RDWR | File::CREAT)
 exit 0 unless lock.flock(File::LOCK_EX | File::LOCK_NB)
 
-devices = wired_devices
+devices = opts[:on_connect] ? wait_for_devices : wired_devices
 exit 0 if devices.empty?
 
-state = load_state
+window = nil
 failed = false
 devices.each do |device|
   device_name = device.dig('deviceProperties', 'name')
-  config['apps'].each do |app|
+  targets = config['apps'].filter_map do |app|
     app = app.merge('project_dir' => File.expand_path(app['project_dir']))
     name = app['name'] || File.basename(app['project_dir'])
     bundle_id = bundle_id_of(app)
@@ -205,38 +305,40 @@ devices.each do |device|
     next unless due || opts[:force] == name
     next unless installed?(device, bundle_id)
 
-    key = "#{device['identifier']}/#{name}"
-    if opts[:dry_run]
-      log "#{name}: #{remaining_text(expires_at)} → 入れ直す対象(--dry-run なので入れ直さない)"
-      next
-    end
-    # 失敗したら1時間は試し直さない(5分ごとに失敗の通知が出続けないように)
-    next if !opts[:force] && recently?(state.dig(key, 'failed_at'))
-
-    unless unlocked?(device)
-      unless recently?(state.dig(key, 'locked_notified_at'))
-        notify("#{device_name} のロックを外すと、#{name} を入れ直します(#{remaining_text(expires_at)})")
-        state[key] = (state[key] || {}).merge('locked_notified_at' => Time.now.iso8601)
-        save_state(state)
-      end
-      next
-    end
-
     reason = due ? remaining_text(expires_at) : '--force の指定'
-    log "#{name}: #{reason}なので #{device_name} に入れ直します"
+    if opts[:dry_run]
+      log "#{name}: #{reason} → 入れ直す対象(--dry-run なので入れ直さない)"
+      next
+    end
+    { app: app, name: name, bundle_id: bundle_id, reason: reason }
+  end
+  next if targets.empty?
+
+  unless unlocked?(device)
+    names = targets.map { |target| "#{target[:name]}(#{target[:reason]})" }.join('・')
+    notify("#{device_name} のロックを外すと、#{names} を入れ直します")
+    # つないだときにしか起動しないので、ロックが外れるまでここで待つ
+    unless opts[:on_connect] && wait_for_unlock(device)
+      log "#{device_name}: ロックが外れなかったので入れ直しません"
+      next
+    end
+  end
+
+  window ||= open_progress_window
+  targets.each do |target|
+    name = target[:name]
+    log "#{name}: #{target[:reason]}なので #{device_name} に入れ直します"
     begin
-      tag, new_expires_at = reinstall(app, name, bundle_id, device)
+      tag, new_expires_at = reinstall(target[:app], name, target[:bundle_id], device)
       log "#{name}: #{tag} を入れ直しました(期限 #{new_expires_at&.strftime('%m/%d %H:%M')})"
       notify("#{name} #{tag} を入れ直しました。次の期限は #{new_expires_at&.strftime('%m/%d %H:%M')}")
-      state.delete(key)
     rescue StandardError => e
       failed = true
       log "#{name}: #{e.message}"
       notify("#{name} の入れ直しに失敗しました。ログ: ~/Library/Logs/ios-reinstall.log")
-      state[key] = { 'failed_at' => Time.now.iso8601 }
     end
-    save_state(state)
   end
 end
+close_progress_window(window, !failed) if window
 
 exit(failed ? 1 : 0)
