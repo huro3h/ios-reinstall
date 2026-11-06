@@ -30,7 +30,9 @@ cp ios-reinstall.example.json ios-reinstall.json   # 対象のアプリを書く
 ./setup.rb --apply                                 # usb-trigger をビルドし、LaunchAgent に登録する
 ```
 
-ログは `~/Library/Logs/ios-reinstall.log`。外すときは `./setup.rb --uninstall --apply`。
+ログは `~/Library/Logs/ios-reinstall.log`。ビルドで警告かエラーが出たときは、そのビルドの出力全体を
+このリポジトリの `error-log/<日時>-<アプリ>-<タグ>.log`(git 管理外)にも残し、通知とターミナルにその場所を出す
+(依存パッケージの警告だけなら残さない)。外すときは `./setup.rb --uninstall --apply`。
 
 ## 設定(ios-reinstall.json)
 

@@ -20,6 +20,10 @@ iPhone を USB でつなぐと、LaunchAgent(`local.ios-reinstall`)が `LaunchEv
 4. 入れ直し: キャッシュ(`~/Library/Caches/ios-reinstall/<name>`)に clone した作業ツリーで最新のタグを checkout し、
    `Config/Local.xcconfig` を写して `xcodegen generate` → **手元のプロファイルを消して** `xcodebuild -allowProvisioningUpdates`
    → `devicectl device install app`。起動はしない(使っている最中のアプリを勝手に前に出さない)。
+   xcodebuild の出力に `warning:` / `error:` があれば(`SourcePackages` の下は除く)、出力全体を
+   リポジトリの `error-log/<日時>-<name>-<tag>.log`(`.gitignore` 済み)に残し、件数と場所を通知・進み具合に出す(`save_build_log`)。
+   各アプリはリリース前に警告を 0 件にする運用なので(`projects-workspace` のルール1.7)、ここで出たらその見落とし。
+   いつものログ(`~/Library/Logs/ios-reinstall.log`)にも全部入っているが、普段の行に紛れて気づけなかった(2026-11-06、aozora 1.4.0)。
 5. 入れ直しを始めるときにターミナルのウインドウを開き、`ios-reinstall.rb --follow ~/Library/Caches/ios-reinstall/progress.log` で
    進み具合を出す。終わったら終わりの印の行を書き、読む側が終わってからウインドウを閉じる。ターミナルが起動していなかったなら終了させる。
 

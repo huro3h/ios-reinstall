@@ -25,12 +25,14 @@ Encoding.default_external = Encoding::UTF_8
 $stdout.sync = true
 
 # リリース時はこことタグ(注釈付き・v なしの数字のみ)と CHANGELOG.md を揃える
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 
 TOOL_ROOT    = File.expand_path(__dir__)
 CONFIG       = File.join(TOOL_ROOT, 'ios-reinstall.json')
 CACHE        = File.join(Dir.home, 'Library', 'Caches', 'ios-reinstall')
 PROGRESS     = File.join(CACHE, 'progress.log')
+# 警告・エラーが出たビルドの出力を、ビルドごとに1ファイルで残す場所(git 管理外)
+BUILD_LOGS   = File.join(TOOL_ROOT, 'error-log')
 PROFILES_DIR = File.join(Dir.home, 'Library', 'Developer', 'Xcode', 'UserData', 'Provisioning Profiles')
 # xcode-select が CommandLineTools を向いていても Xcode の xcodebuild / devicectl を使う
 ENV['DEVELOPER_DIR'] ||= '/Applications/Xcode.app/Contents/Developer'
@@ -62,6 +64,16 @@ def applescript(script)
   output.strip
 end
 
+# 失敗したコマンドの出力を、あとからファイルに残せるように持たせておく
+class CommandFailed < StandardError
+  attr_reader :output
+
+  def initialize(message, output)
+    super(message)
+    @output = output
+  end
+end
+
 # コマンドを実行し、失敗したら出力の末尾を付けて例外にする。stream: true なら出力をそのままログと進み具合にも流す
 def run!(*command, chdir: Dir.pwd, stream: false)
   output = +''
@@ -74,7 +86,25 @@ def run!(*command, chdir: Dir.pwd, stream: false)
   end
   return output if status.success?
 
-  raise "#{command.first(3).join(' ')} に失敗しました:\n#{output.lines.last(30).join}"
+  raise CommandFailed.new("#{command.first(3).join(' ')} に失敗しました:\n#{output.lines.last(30).join}", output)
+end
+
+# ビルドの出力に警告かエラーがあれば、出力全体をファイルに残してそのパスを返す。
+# 依存パッケージ(SourcePackages の下)の警告は直す対象ではないので数えない(毎回ファイルができてしまう)
+def save_build_log(name, tag, output)
+  issues = output.lines.grep(/\b(warning|error):/).grep_v(%r{/SourcePackages/})
+  return nil if issues.empty?
+
+  FileUtils.mkdir_p(BUILD_LOGS)
+  path = File.join(BUILD_LOGS, "#{Time.now.strftime('%Y%m%d-%H%M%S')}-#{name}-#{tag}.log")
+  File.write(path, output)
+  { path: path, warnings: issues.grep(/\bwarning:/).size, errors: issues.grep(/\berror:/).size }
+end
+
+def build_log_text(build_log)
+  counts = [("警告 #{build_log[:warnings]} 件" if build_log[:warnings].positive?),
+            ("エラー #{build_log[:errors]} 件" if build_log[:errors].positive?)].compact.join('・')
+  "#{counts}。ログ: #{build_log[:path].sub(Dir.home, '~')}"
 end
 
 # devicectl の結果は JSON ファイルに書き出させて読むのが正式な使い方(標準出力の書式は保証されない)
@@ -251,14 +281,21 @@ def reinstall(app, name, bundle_id, device)
   # 手元のプロファイルが残っていると、それがそのまま使われて期限が延びない。消せば Xcode が新しく作る
   profiles_for(bundle_id).each { |profile| File.delete(profile[:path]) }
   log "#{name}: ビルドしています(プロファイルも作り直します)"
-  run!('xcodebuild', '-quiet', '-project', "#{scheme}.xcodeproj", '-scheme', scheme,
-       '-destination', "id=#{device.dig('hardwareProperties', 'udid')}",
-       '-derivedDataPath', 'build/DerivedData',
-       '-allowProvisioningUpdates', '-allowProvisioningDeviceRegistration', 'build', chdir: source, stream: true)
+  begin
+    output = run!('xcodebuild', '-quiet', '-project', "#{scheme}.xcodeproj", '-scheme', scheme,
+                  '-destination', "id=#{device.dig('hardwareProperties', 'udid')}",
+                  '-derivedDataPath', 'build/DerivedData',
+                  '-allowProvisioningUpdates', '-allowProvisioningDeviceRegistration', 'build', chdir: source, stream: true)
+  rescue CommandFailed => e
+    build_log = save_build_log(name, tag, e.output)
+    raise build_log ? "ビルドに失敗しました(#{build_log_text(build_log)})" : e.message
+  end
+  build_log = save_build_log(name, tag, output)
+  log "#{name}: ビルドで#{build_log_text(build_log)}" if build_log
   built = File.join(source, 'build', 'DerivedData', 'Build', 'Products', 'Debug-iphoneos', "#{scheme}.app")
   log "#{name}: iPhone に入れています"
   run!('xcrun', 'devicectl', 'device', 'install', 'app', '--device', device['identifier'], built, stream: true)
-  [tag, read_profile(File.join(built, 'embedded.mobileprovision'))&.dig(:expires_at)]
+  [tag, read_profile(File.join(built, 'embedded.mobileprovision'))&.dig(:expires_at), build_log]
 end
 
 opts = { config: CONFIG }
@@ -329,13 +366,15 @@ devices.each do |device|
     name = target[:name]
     log "#{name}: #{target[:reason]}なので #{device_name} に入れ直します"
     begin
-      tag, new_expires_at = reinstall(target[:app], name, target[:bundle_id], device)
+      tag, new_expires_at, build_log = reinstall(target[:app], name, target[:bundle_id], device)
       log "#{name}: #{tag} を入れ直しました(期限 #{new_expires_at&.strftime('%m/%d %H:%M')})"
-      notify("#{name} #{tag} を入れ直しました。次の期限は #{new_expires_at&.strftime('%m/%d %H:%M')}")
+      message = "#{name} #{tag} を入れ直しました。次の期限は #{new_expires_at&.strftime('%m/%d %H:%M')}"
+      notify(build_log ? "#{message}。ビルドで#{build_log_text(build_log)}" : message)
     rescue StandardError => e
       failed = true
       log "#{name}: #{e.message}"
-      notify("#{name} の入れ直しに失敗しました。ログ: ~/Library/Logs/ios-reinstall.log")
+      # ビルドの失敗なら、そのビルドのログの場所が e.message に入っている
+      notify("#{name} の入れ直しに失敗しました。#{e.message.start_with?('ビルドに失敗') ? e.message : 'ログ: ~/Library/Logs/ios-reinstall.log'}")
     end
   end
 end
