@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-06
+
+### Changed
+
+- LaunchAgent の ruby を rbenv の shim にした(rbenv があるとき)。Ruby を上げても `setup.rb` をやり直さなくてよい
+
 ## [1.2.0] - 2026-11-06
 
 ### Added

@@ -25,7 +25,7 @@ Encoding.default_external = Encoding::UTF_8
 $stdout.sync = true
 
 # リリース時はこことタグ(注釈付き・v なしの数字のみ)と CHANGELOG.md を揃える
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 
 TOOL_ROOT    = File.expand_path(__dir__)
 CONFIG       = File.join(TOOL_ROOT, 'ios-reinstall.json')

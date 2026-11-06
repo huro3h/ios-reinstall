@@ -21,6 +21,10 @@ TRIGGER_SRC = File.join(TOOL_ROOT, 'usb-trigger.swift')
 TRIGGER     = File.join(TOOL_ROOT, '.build', 'usb-trigger')
 DEST      = File.join(Dir.home, 'Library', 'LaunchAgents', "#{LABEL}.plist")
 LOG       = File.join(Dir.home, 'Library', 'Logs', 'ios-reinstall.log')
+# rbenv の shim は rbenv 本体を絶対パスで呼ぶので、launchd の痩せた PATH でも解決できる。
+# shim を埋めておけば、Ruby を上げても plist を作り直さずに済む。rbenv が無ければ実体の ruby を埋める。
+RBENV_SHIM = File.join(ENV['RBENV_ROOT'] || File.join(Dir.home, '.rbenv'), 'shims', 'ruby')
+RUBY       = File.executable?(RBENV_SHIM) ? RBENV_SHIM : RbConfig.ruby
 
 def die(msg) = (warn "error: #{msg}"; exit 2)
 
@@ -51,18 +55,17 @@ die("テンプレートがありません: #{TEMPLATE}") unless File.exist?(TEMP
 die("実行ファイルがありません: #{SCRIPT}") unless File.executable?(SCRIPT)
 die("設定ファイルがありません: #{CONFIG}(ios-reinstall.example.json を写して作る)") unless File.exist?(CONFIG)
 
-# rbenv の shim は launchd から解決できないので、実体の ruby を埋める
 plist = File.read(TEMPLATE)
             .gsub('{{LABEL}}', LABEL)
             .gsub('{{TRIGGER}}', TRIGGER)
-            .gsub('{{RUBY}}', RbConfig.ruby)
+            .gsub('{{RUBY}}', RUBY)
             .gsub('{{SCRIPT}}', SCRIPT)
             .gsub('{{LOG}}', LOG)
 
 unless opts[:apply]
   puts "生成先: #{DEST}"
   puts "  trigger: #{TRIGGER}(#{File.basename(TRIGGER_SRC)} からビルドする)"
-  puts "  ruby   : #{RbConfig.ruby}"
+  puts "  ruby   : #{RUBY}"
   puts "  script : #{SCRIPT}"
   puts "  log    : #{LOG}"
   puts "\n実際に書き込んで読み込むには --apply を付けてください"

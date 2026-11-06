@@ -55,7 +55,10 @@ iPhone を USB でつなぐと、LaunchAgent(`local.ios-reinstall`)が `LaunchEv
   ロック中かどうかは `device info lockState` の `passcodeRequired`。
 - launchd からは PATH に Homebrew がなく、`xcode-select` が CommandLineTools を向いていることもあるので、
   plist で `PATH`(`/opt/homebrew/bin` を含む)と `DEVELOPER_DIR` を渡す。LANG がないと osascript に渡す日本語が化ける。
-- rbenv の shim は launchd から解決できないので、`setup.rb` が実体の ruby のパスを plist に埋める(app-respawn と同じ)。
+- plist の ruby は rbenv の shim(`~/.rbenv/shims/ruby`)にしてある。shim は rbenv 本体を絶対パスで呼ぶので、launchd の痩せた PATH でも
+  global のバージョンに解決できる(2026-11-06 に `launchctl submit` で確認)。Ruby を上げても `setup.rb` をやり直さなくてよい。
+  以前は「shim は launchd から解決できない」として実体のパスを埋めていた。ios-reinstall は起動の先頭が `usb-trigger` なので、
+  ruby が変わっても TCC の許可には影響しない(app-respawn は先頭が ruby なので事情が違う)。
 
 ## 対象のアプリ側
 
